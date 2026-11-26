@@ -26,22 +26,43 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: "platform-tools platforms;android-36.1 build-tools;36.0.0"
 
       - name: Set up Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Ensure gradlew is executable
-        run: chmod +x gradlew
+      - name: Verify Gradle Wrapper
+        run: |
+          test -f ./gradlew
+          test -f ./gradle/wrapper/gradle-wrapper.jar
+          test -f ./gradle/wrapper/gradle-wrapper.properties
+          chmod +x ./gradlew
+          ./gradlew --version
+
+      - name: Ensure Debug Keystore
+        run: |
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+            else
+              keytool -genkeypair -v -keystore debug.keystore \
+                -storepass android -alias androiddebugkey -keypass android \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+        run: ./gradlew clean assembleDebug --stacktrace --no-daemon
 
       - name: Generate Build & ARM64 Diagnostics
         if: always()
         run: |
           echo "=== Build Environment ==="
           java -version
-          gradle --version
+          ./gradlew --version
           echo "=== Output APK Inspection ==="
           APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
           if [ -f "$APK_PATH" ]; then
@@ -49,7 +70,7 @@ jobs:
             echo "=== Verify WebView Assets in APK ==="
             unzip -l "$APK_PATH" | grep -E "assets/(index\.html|style\.css|app\.js)"
             echo "=== ARM64 Compatibility ==="
-            echo "Pure Kotlin/Compose + WebView APK supports arm64-v8a, armeabi-v7a, and x86_64."
+            echo "APK supports arm64-v8a, armeabi-v7a, and x86_64."
           else
             echo "APK not found at $APK_PATH"
             exit 1
