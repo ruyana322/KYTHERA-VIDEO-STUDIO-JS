@@ -1,74 +1,124 @@
 package com.example
 
-import android.graphics.Color
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
-import android.util.Base64
-import android.util.Log
-import android.webkit.WebView
 import androidx.activity.ComponentActivity
-import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import com.example.bridge.KytheraHostActions
-import com.example.bridge.KytheraNativeBridge
-import com.example.media.MediaCodecCapabilityInspector
 import com.example.media.ZipProjectHandler
+import com.example.model.LayerType
+import com.example.model.ShapeKind
+import com.example.model.StudioTab
+import com.example.ui.components.AmbientGlassBackground
+import com.example.ui.components.FrostedFloatingBottomBar
+import com.example.ui.components.FrostedNavigationRail
+import com.example.ui.screens.EditorScreen
+import com.example.ui.screens.ExportScreen
+import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.JsStudioScreen
+import com.example.ui.sheets.AnimationSheet
+import com.example.ui.sheets.DiagnosticsDialog
+import com.example.ui.sheets.EffectsSheet
+import com.example.ui.sheets.LayerSettingsDialog
+import com.example.ui.sheets.NewProjectDialog
+import com.example.ui.theme.KytheraPeriwinkle
 import com.example.ui.theme.KytheraStudioTheme
-import com.example.webview.KytheraWebViewHost
+import com.example.viewmodel.StudioViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.nio.charset.StandardCharsets
 
-class MainActivity : ComponentActivity(), KytheraHostActions {
+class MainActivity : ComponentActivity() {
 
-  private var webView: WebView? = null
-  private var pendingZipFilesJson: String? = null
-  private var pendingJsonContent: String? = null
-  private var externalStartupError by mutableStateOf<String?>(null)
-  private var externalBootConfirmed by mutableStateOf(false)
-
-  private val mediaEngine = MediaCodecCapabilityInspector()
+  private val viewModel: StudioViewModel by viewModels()
+  private var pendingZipPayload: String? = null
+  private var pendingJsonPayload: String? = null
 
   private val mediaPickerLauncher = registerForActivityResult(
     ActivityResultContracts.PickVisualMedia(),
   ) { uri ->
-    if (uri != null) handlePickedMedia(uri)
+    if (uri != null) {
+      val mime = contentResolver.getType(uri) ?: "image/jpeg"
+      val isVideo = mime.startsWith("video/")
+      val displayName = queryDisplayName(uri) ?: if (isVideo) "Clip.mp4" else "Image.png"
+      viewModel.addPickedMediaLayer(uri, displayName, isVideo)
+    }
   }
 
   private val zipOpenLauncher = registerForActivityResult(
     ActivityResultContracts.OpenDocument(),
   ) { uri ->
-    if (uri != null) handleImportedZip(uri)
+    if (uri != null) {
+      lifecycleScope.launch(Dispatchers.IO) {
+        val extractedJson = runCatching {
+          ZipProjectHandler.extractZipToJson(contentResolver, uri)
+        }.getOrDefault("{}")
+        withContext(Dispatchers.Main) {
+          viewModel.importZipFilesJson(extractedJson)
+        }
+      }
+    }
   }
 
   private val projectOpenLauncher = registerForActivityResult(
     ActivityResultContracts.OpenDocument(),
   ) { uri ->
-    if (uri != null) handleImportedProject(uri)
+    if (uri != null) {
+      lifecycleScope.launch(Dispatchers.IO) {
+        val content = runCatching {
+          contentResolver.openInputStream(uri)?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }
+        }.getOrNull()
+        if (!content.isNullOrBlank()) {
+          withContext(Dispatchers.Main) {
+            viewModel.importProjectJson(content)
+          }
+        }
+      }
+    }
   }
 
   private val zipCreateLauncher = registerForActivityResult(
     ActivityResultContracts.CreateDocument("application/zip"),
   ) { uri ->
-    val payload = pendingZipFilesJson
-    pendingZipFilesJson = null
+    val payload = pendingZipPayload
+    pendingZipPayload = null
     if (uri != null && payload != null) {
       lifecycleScope.launch(Dispatchers.IO) {
         runCatching { ZipProjectHandler.writeZipFromJson(contentResolver, uri, payload) }
           .onSuccess {
             withContext(Dispatchers.Main) {
-              dispatchToastToWeb("Exported ZIP archive")
+              viewModel.showToast("Exported ZIP bundle")
             }
           }
       }
@@ -78,8 +128,8 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
   private val jsonCreateLauncher = registerForActivityResult(
     ActivityResultContracts.CreateDocument("application/json"),
   ) { uri ->
-    val payload = pendingJsonContent
-    pendingJsonContent = null
+    val payload = pendingJsonPayload
+    pendingJsonPayload = null
     if (uri != null && payload != null) {
       lifecycleScope.launch(Dispatchers.IO) {
         runCatching {
@@ -88,7 +138,7 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
           }
         }.onSuccess {
           withContext(Dispatchers.Main) {
-            dispatchToastToWeb("Exported project JSON")
+            viewModel.showToast("Exported .kythera.json project")
           }
         }
       }
@@ -97,161 +147,48 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    Log.i(TAG, "MainActivity.onCreate")
     enableEdgeToEdge(
-      statusBarStyle = SystemBarStyle.dark(Color.parseColor("#07090E")),
-      navigationBarStyle = SystemBarStyle.dark(Color.parseColor("#07090E")),
-    )
-
-    onBackPressedDispatcher.addCallback(
-      this,
-      object : OnBackPressedCallback(true) {
-        override fun handleOnBackPressed() {
-          val wv = webView
-          if (wv == null) {
-            isEnabled = false
-            onBackPressedDispatcher.onBackPressed()
-            return
-          }
-          wv.evaluateJavascript("window.kytheraHandleBack && window.kytheraHandleBack()") { result ->
-            if (result != "true") {
-              isEnabled = false
-              onBackPressedDispatcher.onBackPressed()
-            }
-          }
-        }
-      },
-    )
-
-    val bridge = KytheraNativeBridge(
-      context = applicationContext,
-      mediaEngine = mediaEngine,
-      hostActions = this,
+      statusBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
+      navigationBarStyle = SystemBarStyle.auto(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT),
     )
 
     setContent {
-      KytheraStudioTheme {
-        KytheraWebViewHost(
-          nativeBridge = bridge,
-          externalStartupError = externalStartupError,
-          externalBootConfirmed = externalBootConfirmed,
-          onClearExternalError = {
-            externalStartupError = null
-            externalBootConfirmed = false
+      val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+      KytheraStudioTheme(darkTheme = uiState.darkGlassMode) {
+        KytheraStudioApp(
+          viewModel = viewModel,
+          onPickMedia = {
+            mediaPickerLauncher.launch(
+              PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+            )
           },
-          onWebViewCreated = { created -> webView = created },
+          onImportProject = {
+            projectOpenLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+          },
+          onImportZip = {
+            zipOpenLauncher.launch(
+              arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"),
+            )
+          },
+          onExportZip = {
+            val (name, payload) = viewModel.buildJsFilesJsonForZipExport()
+            pendingZipPayload = payload
+            zipCreateLauncher.launch(name)
+          },
+          onExportJson = {
+            val (name, payload) = viewModel.buildActiveProjectJsonForExport()
+            pendingJsonPayload = payload
+            jsonCreateLauncher.launch(name)
+          },
         )
       }
     }
-  }
-
-  override fun onResume() {
-    super.onResume()
-    webView?.onResume()
-    webView?.resumeTimers()
   }
 
   override fun onPause() {
-    webView?.onPause()
+    viewModel.pausePlayback()
     super.onPause()
-  }
-
-  override fun onWebAppReady() {
-    Log.i(TAG, "WebApp confirmed ready")
-    externalBootConfirmed = true
-  }
-
-  override fun onWebStartupError(errorMessage: String) {
-    Log.e(TAG, "WebApp startup error: $errorMessage")
-    externalStartupError = errorMessage
-  }
-
-  override fun onRequestMediaPick() {
-    mediaPickerLauncher.launch(
-      PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
-    )
-  }
-
-  override fun onRequestZipImport() {
-    zipOpenLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
-  }
-
-  override fun onRequestProjectImport() {
-    projectOpenLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
-  }
-
-  override fun onRequestZipExport(suggestedFilename: String, filesJson: String) {
-    pendingZipFilesJson = filesJson
-    zipCreateLauncher.launch(suggestedFilename.ifBlank { "kythera-project.zip" })
-  }
-
-  override fun onRequestJsonExport(suggestedFilename: String, content: String) {
-    pendingJsonContent = content
-    jsonCreateLauncher.launch(suggestedFilename.ifBlank { "project.kythera.json" })
-  }
-
-  private fun handlePickedMedia(uri: Uri) {
-    lifecycleScope.launch(Dispatchers.IO) {
-      val mime = contentResolver.getType(uri) ?: "image/jpeg"
-      val isVideo = mime.startsWith("video/")
-      val displayName = queryDisplayName(uri) ?: if (isVideo) "Clip.mp4" else "Image.png"
-      var dataUrl: String? = null
-
-      if (!isVideo) {
-        runCatching {
-          contentResolver.openInputStream(uri)?.use { stream ->
-            val bytes = stream.readBytes()
-            if (bytes.size <= 3 * 1024 * 1024) {
-              val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-              dataUrl = "data:$mime;base64,$b64"
-            }
-          }
-        }
-      }
-
-      val json = JSONObject().apply {
-        put("name", displayName)
-        put("isVideo", isVideo)
-        put("dataUrl", dataUrl ?: JSONObject.NULL)
-      }.toString()
-
-      withContext(Dispatchers.Main) {
-        webView?.evaluateJavascript(
-          "window.__kytheraNativeMediaPicked(${JSONObject.quote(json)})",
-          null,
-        )
-      }
-    }
-  }
-
-  private fun handleImportedZip(uri: Uri) {
-    lifecycleScope.launch(Dispatchers.IO) {
-      val extractedJson = runCatching {
-        ZipProjectHandler.extractZipToJson(contentResolver, uri)
-      }.getOrDefault("{}")
-
-      withContext(Dispatchers.Main) {
-        webView?.evaluateJavascript(
-          "window.__kytheraNativeZipImported(${JSONObject.quote(extractedJson)})",
-          null,
-        )
-      }
-    }
-  }
-
-  private fun handleImportedProject(uri: Uri) {
-    lifecycleScope.launch(Dispatchers.IO) {
-      val content = runCatching {
-        contentResolver.openInputStream(uri)?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }
-      }.getOrNull() ?: return@launch
-
-      withContext(Dispatchers.Main) {
-        webView?.evaluateJavascript(
-          "window.__kytheraNativeProjectImported(${JSONObject.quote(content)})",
-          null,
-        )
-      }
-    }
   }
 
   private fun queryDisplayName(uri: Uri): String? {
@@ -261,20 +198,217 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
       }
     }.getOrNull()
   }
+}
 
-  private fun dispatchToastToWeb(message: String) {
-    webView?.evaluateJavascript("androidToast && androidToast(${JSONObject.quote(message)})", null)
-    android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+@Composable
+private fun KytheraStudioApp(
+  viewModel: StudioViewModel,
+  onPickMedia: () -> Unit,
+  onImportProject: () -> Unit,
+  onImportZip: () -> Unit,
+  onExportZip: () -> Unit,
+  onExportJson: () -> Unit,
+) {
+  val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  val snackbarHostState = remember { SnackbarHostState() }
+
+  LaunchedEffect(uiState.toastMessage) {
+    val msg = uiState.toastMessage
+    if (!msg.isNullOrBlank()) {
+      snackbarHostState.showSnackbar(msg)
+      viewModel.consumeToast()
+    }
   }
 
-  override fun onDestroy() {
-    webView?.stopLoading()
-    webView?.destroy()
-    webView = null
-    super.onDestroy()
-  }
+  AmbientGlassBackground {
+    BoxWithConstraints(
+      modifier = Modifier
+        .fillMaxSize()
+        .windowInsetsPadding(WindowInsets.safeDrawing),
+    ) {
+      val useNavRail = maxWidth >= 680.dp
 
-  private companion object {
-    const val TAG = "KytheraMain"
+      Scaffold(
+        containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        snackbarHost = {
+          SnackbarHost(hostState = snackbarHostState) { data ->
+            Snackbar(
+              snackbarData = data,
+              shape = RoundedCornerShape(16.dp),
+              containerColor = KytheraPeriwinkle,
+              contentColor = Color.White,
+            )
+          }
+        },
+      ) { innerPadding ->
+        Row(
+          modifier = Modifier
+            .fillMaxSize()
+            .padding(innerPadding),
+        ) {
+          if (useNavRail) {
+            FrostedNavigationRail(
+              activeTab = uiState.activeTab,
+              onSelectTab = viewModel::selectTab,
+              onNewProjectClick = { viewModel.setShowNewProjectDialog(true) },
+            )
+          }
+
+          Box(modifier = Modifier.weight(1f).fillMaxSize()) {
+            val bottomNavPad = if (!useNavRail && uiState.activeTab != StudioTab.EDITOR) {
+              PaddingValues(bottom = 86.dp)
+            } else {
+              PaddingValues(0.dp)
+            }
+
+            when (uiState.activeTab) {
+              StudioTab.HOME -> HomeScreen(
+                uiState = uiState,
+                onOpenProject = viewModel::openProjectInEditor,
+                onNewProject = { viewModel.setShowNewProjectDialog(true) },
+                onImportProject = onImportProject,
+                onImportZip = onImportZip,
+                onOpenJsStudio = { viewModel.selectTab(StudioTab.SCRIPTS) },
+                onDuplicateProject = viewModel::duplicateProject,
+                onDeleteProject = viewModel::deleteProject,
+                onToggleTheme = viewModel::toggleThemeMode,
+                onOpenDiagnostics = { viewModel.setShowDiagnosticsDialog(true) },
+                bottomContentPadding = bottomNavPad,
+              )
+
+              StudioTab.EDITOR -> EditorScreen(
+                uiState = uiState,
+                onBackHome = { viewModel.selectTab(StudioTab.HOME) },
+                onRenameProject = viewModel::renameActiveProject,
+                onUndo = viewModel::undo,
+                onRedo = viewModel::redo,
+                onCycleQuality = viewModel::cyclePreviewQuality,
+                onCycleAspect = viewModel::cycleAspectRatio,
+                onOpenExport = { viewModel.selectTab(StudioTab.EXPORT) },
+                onTogglePlay = viewModel::togglePlayPause,
+                onScrub = viewModel::scrubTo,
+                onZoomDelta = viewModel::adjustTimelineZoom,
+                onSelectLayer = viewModel::selectLayer,
+                onToggleVisibility = viewModel::toggleLayerVisibility,
+                onToggleLock = viewModel::toggleLayerLock,
+                onShiftLayerStart = viewModel::shiftLayerStart,
+                onPickMedia = onPickMedia,
+                onAddAudio = {
+                  viewModel.addLayer(LayerType.AUDIO, "Synth Pulse Beat.wav", colorHex = 0xFF00C48C)
+                },
+                onAddText = {
+                  viewModel.addLayer(LayerType.TEXT, "Title Layer", textContent = "MOTION", colorHex = 0xFFF3F6FF)
+                },
+                onAddShape = {
+                  val kinds = ShapeKind.entries
+                  val nextKind = kinds[(uiState.activeProject?.layers?.size ?: 0) % kinds.size]
+                  viewModel.addLayer(LayerType.SHAPE, nextKind.label, shapeKind = nextKind, colorHex = 0xFF00C6FF)
+                },
+                onToggleDrawMode = viewModel::toggleDrawMode,
+                onOpenEffects = { viewModel.setShowEffectsSheet(true) },
+                onOpenAnimation = { viewModel.setShowAnimationSheet(true) },
+                onOpenLayerSettings = { viewModel.setShowLayerSettingsDialog(true) },
+                onRequestImageLoad = viewModel::ensureImageLoaded,
+                onCommitDrawStroke = viewModel::appendDrawStroke,
+              )
+
+              StudioTab.SCRIPTS -> JsStudioScreen(
+                preset = uiState.jsPreset,
+                files = uiState.jsFiles,
+                activeFile = uiState.jsActiveFile,
+                consoleLogs = uiState.jsConsoleLogs,
+                isPlaying = uiState.jsPlaying,
+                onBack = { viewModel.selectTab(StudioTab.HOME) },
+                onSelectFile = viewModel::selectJsFile,
+                onEditContent = viewModel::updateJsFileContent,
+                onAddNewFile = viewModel::addNewJsFile,
+                onTogglePreset = viewModel::toggleJsPreset,
+                onImportZip = onImportZip,
+                onExportZip = onExportZip,
+                onRunRender = viewModel::runJsRenderPass,
+                onClearConsole = viewModel::clearJsConsole,
+                onSendToTimeline = viewModel::sendJsAnimationToTimeline,
+                bottomContentPadding = bottomNavPad,
+              )
+
+              StudioTab.EXPORT -> ExportScreen(
+                uiState = uiState,
+                onBack = { viewModel.selectTab(StudioTab.EDITOR) },
+                onUpdateResolution = { viewModel.updateExportConfig(resolution = it) },
+                onUpdateFps = { viewModel.updateExportConfig(fps = it) },
+                onUpdateBitrate = { viewModel.updateExportConfig(bitrateMbps = it) },
+                onUpdateFormat = { viewModel.updateExportConfig(format = it) },
+                onStartExport = viewModel::startSimulatedExport,
+                onCancelExport = viewModel::cancelExport,
+                onExportJson = onExportJson,
+                bottomContentPadding = bottomNavPad,
+              )
+            }
+
+            if (!useNavRail && uiState.activeTab != StudioTab.EDITOR) {
+              FrostedFloatingBottomBar(
+                activeTab = uiState.activeTab,
+                onSelectTab = viewModel::selectTab,
+                onNewProjectClick = { viewModel.setShowNewProjectDialog(true) },
+                modifier = Modifier.align(Alignment.BottomCenter),
+              )
+            }
+          }
+        }
+      }
+    }
+
+    if (uiState.showNewProjectDialog) {
+      NewProjectDialog(
+        onCreate = viewModel::createProject,
+        onDismiss = { viewModel.setShowNewProjectDialog(false) },
+      )
+    }
+
+    val selectedLayer = uiState.selectedLayer
+    if (uiState.showAnimationSheet && selectedLayer != null) {
+      AnimationSheet(
+        layer = selectedLayer,
+        currentTimeSec = uiState.currentTimeSec,
+        activeProperty = uiState.activeAnimProp,
+        onSelectProperty = viewModel::setActiveAnimationProperty,
+        onSetKeyframeValue = viewModel::setLayerKeyframeValue,
+        onToggleKeyframe = viewModel::toggleKeyframeAtPlayhead,
+        onUpdateEasing = { viewModel.updateLayerEasing(it, recordUndo = false) },
+        onToggleMotionBlur = viewModel::toggleLayerMotionBlur,
+        onDismiss = { viewModel.setShowAnimationSheet(false) },
+      )
+    }
+
+    if (uiState.showEffectsSheet && selectedLayer != null) {
+      EffectsSheet(
+        layer = selectedLayer,
+        selectedCategory = uiState.activeEffectCategory,
+        searchQuery = uiState.effectSearchQuery,
+        onSelectCategory = viewModel::setEffectCategory,
+        onSearchChange = viewModel::setEffectSearch,
+        onAddEffect = viewModel::addEffectToSelectedLayer,
+        onUpdateEffectValue = viewModel::updateEffectValue,
+        onRemoveEffect = viewModel::removeEffect,
+        onDismiss = { viewModel.setShowEffectsSheet(false) },
+      )
+    }
+
+    if (uiState.showLayerSettingsDialog && selectedLayer != null) {
+      LayerSettingsDialog(
+        layer = selectedLayer,
+        onSave = viewModel::updateSelectedLayerMeta,
+        onDelete = viewModel::deleteSelectedLayer,
+        onDismiss = { viewModel.setShowLayerSettingsDialog(false) },
+      )
+    }
+
+    if (uiState.showDiagnosticsDialog) {
+      DiagnosticsDialog(
+        diagnostics = uiState.diagnostics,
+        onDismiss = { viewModel.setShowDiagnosticsDialog(false) },
+      )
+    }
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "Kythera Studio",
-  "description": "KYTHERA VIDEO STUDIO — Create Without Limits. Mobile motion graphics & multi-layer video editing studio prototype with keyframe animation, effects browser, JS Animation Studio, and native Android WebView integration.",
+  "description": "KYTHERA VIDEO STUDIO — Create Without Limits. Native Jetpack Compose motion graphics & multi-layer video editing studio with frosted glassmorphism UI, Bezier keyframe animation, effects browser, JS Animation Studio, and MediaCodec export.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
