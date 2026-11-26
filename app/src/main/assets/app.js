@@ -147,6 +147,11 @@ animate();`
     }
   };
 
+  function deepClone(obj) {
+    if (typeof structuredClone === "function") return structuredClone(obj);
+    return JSON.parse(JSON.stringify(obj));
+  }
+
   const state = {
     currentScreen: "home",
     previousScreen: "home",
@@ -175,7 +180,7 @@ animate();`
     },
     exportTimer: null,
     jsStudio: {
-      files: structuredClone(JS_PRESETS.cyberPulse.files),
+      files: deepClone(JS_PRESETS.cyberPulse.files),
       activeFile: "app.js",
       presetKey: "cyberPulse",
     },
@@ -1684,7 +1689,7 @@ animate();`
     });
     card2.querySelector("#ls-dup-btn").addEventListener("click", () => {
       pushUndo("Duplicate layer");
-      const copy = structuredClone(layer);
+      const copy = deepClone(layer);
       copy.id = "lyr_" + Math.random().toString(36).slice(2, 8);
       copy.name = `${layer.name} Copy`;
       proj.layers.push(copy);
@@ -2431,7 +2436,7 @@ animate();`
       }
       pushUndo("Split layer");
       const splitOffset = Number((state.playhead - layer.start).toFixed(2));
-      const rightPart = structuredClone(layer);
+      const rightPart = deepClone(layer);
       rightPart.id = "lyr_" + Math.random().toString(36).slice(2, 8);
       rightPart.name = `${layer.name} (2)`;
       rightPart.start = Number(state.playhead.toFixed(2));
@@ -2640,7 +2645,7 @@ animate();`
     document.getElementById("btn-js-preset").addEventListener("click", () => {
       const nextKey = state.jsStudio.presetKey === "cyberPulse" ? "kineticBars" : "cyberPulse";
       state.jsStudio.presetKey = nextKey;
-      state.jsStudio.files = structuredClone(JS_PRESETS[nextKey].files);
+      state.jsStudio.files = deepClone(JS_PRESETS[nextKey].files);
       state.jsStudio.activeFile = "app.js";
       renderJsStudioFiles();
       runJsStudioPreview();
@@ -2731,11 +2736,33 @@ animate();`
       .replace(/"/g, "&quot;");
   }
 
-  // Boot
-  loadProjects();
-  initInteractions();
-  renderHomeProjects();
-  window.addEventListener("resize", () => {
-    if (state.currentScreen === "editor") renderActivePreview();
+  function reportStartupFailure(err) {
+    const msg = (err && (err.stack || err.message)) ? String(err.stack || err.message) : String(err);
+    console.error("[KytheraStartupError]", msg);
+    if (window.AndroidBridge && typeof window.AndroidBridge.reportStartupError === "function") {
+      window.AndroidBridge.reportStartupError(msg);
+    }
+  }
+
+  window.addEventListener("error", (ev) => {
+    reportStartupFailure(ev.error || ev.message || "Unhandled JS error");
   });
+
+  // Boot
+  try {
+    loadProjects();
+    initInteractions();
+    renderHomeProjects();
+    window.addEventListener("resize", () => {
+      if (state.currentScreen === "editor") renderActivePreview();
+    });
+    window.__kytheraBootOk = true;
+    console.log("[KytheraBoot] App initialized successfully");
+    if (window.AndroidBridge && typeof window.AndroidBridge.reportAppReady === "function") {
+      window.AndroidBridge.reportAppReady();
+    }
+  } catch (bootErr) {
+    window.__kytheraBootOk = false;
+    reportStartupFailure(bootErr);
+  }
 })();

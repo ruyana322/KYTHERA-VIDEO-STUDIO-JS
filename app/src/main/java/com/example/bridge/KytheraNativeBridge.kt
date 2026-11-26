@@ -3,6 +3,7 @@ package com.example.bridge
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.widget.Toast
 import com.example.media.MediaEngineGateway
@@ -13,6 +14,8 @@ interface KytheraHostActions {
   fun onRequestProjectImport()
   fun onRequestZipExport(suggestedFilename: String, filesJson: String)
   fun onRequestJsonExport(suggestedFilename: String, content: String)
+  fun onWebAppReady() {}
+  fun onWebStartupError(errorMessage: String) {}
 }
 
 class KytheraNativeBridge(
@@ -57,5 +60,21 @@ class KytheraNativeBridge(
     mainHandler.post {
       Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
     }
+  }
+
+  @JavascriptInterface
+  fun reportAppReady() {
+    Log.i(TAG, "JS reportAppReady() invoked")
+    mainHandler.post { hostActions.onWebAppReady() }
+  }
+
+  @JavascriptInterface
+  fun reportStartupError(errorMessage: String) {
+    Log.e(TAG, "JS reportStartupError(): $errorMessage")
+    mainHandler.post { hostActions.onWebStartupError(errorMessage) }
+  }
+
+  private companion object {
+    const val TAG = "KytheraBridge"
   }
 }

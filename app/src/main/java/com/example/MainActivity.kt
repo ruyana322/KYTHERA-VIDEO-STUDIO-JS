@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Base64
+import android.util.Log
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -13,6 +14,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
 import com.example.bridge.KytheraHostActions
 import com.example.bridge.KytheraNativeBridge
@@ -31,6 +35,8 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
   private var webView: WebView? = null
   private var pendingZipFilesJson: String? = null
   private var pendingJsonContent: String? = null
+  private var externalStartupError by mutableStateOf<String?>(null)
+  private var externalBootConfirmed by mutableStateOf(false)
 
   private val mediaEngine = MediaCodecCapabilityInspector()
 
@@ -91,6 +97,7 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    Log.i(TAG, "MainActivity.onCreate")
     enableEdgeToEdge(
       statusBarStyle = SystemBarStyle.dark(Color.parseColor("#07090E")),
       navigationBarStyle = SystemBarStyle.dark(Color.parseColor("#07090E")),
@@ -126,10 +133,37 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
       KytheraStudioTheme {
         KytheraWebViewHost(
           nativeBridge = bridge,
+          externalStartupError = externalStartupError,
+          externalBootConfirmed = externalBootConfirmed,
+          onClearExternalError = {
+            externalStartupError = null
+            externalBootConfirmed = false
+          },
           onWebViewCreated = { created -> webView = created },
         )
       }
     }
+  }
+
+  override fun onResume() {
+    super.onResume()
+    webView?.onResume()
+    webView?.resumeTimers()
+  }
+
+  override fun onPause() {
+    webView?.onPause()
+    super.onPause()
+  }
+
+  override fun onWebAppReady() {
+    Log.i(TAG, "WebApp confirmed ready")
+    externalBootConfirmed = true
+  }
+
+  override fun onWebStartupError(errorMessage: String) {
+    Log.e(TAG, "WebApp startup error: $errorMessage")
+    externalStartupError = errorMessage
   }
 
   override fun onRequestMediaPick() {
@@ -234,8 +268,13 @@ class MainActivity : ComponentActivity(), KytheraHostActions {
   }
 
   override fun onDestroy() {
+    webView?.stopLoading()
     webView?.destroy()
     webView = null
     super.onDestroy()
+  }
+
+  private companion object {
+    const val TAG = "KytheraMain"
   }
 }
