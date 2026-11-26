@@ -58,7 +58,7 @@ jobs:
         run: ./gradlew clean assembleDebug --stacktrace --no-daemon
 
       - name: Generate Build & ARM64 Diagnostics
-        if: always()
+        if: success()
         run: |
           echo "=== Build Environment ==="
           java -version
@@ -67,10 +67,10 @@ jobs:
           APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
           if [ -f "$APK_PATH" ]; then
             ls -lh "$APK_PATH"
-            echo "=== Verify WebView Assets in APK ==="
-            unzip -l "$APK_PATH" | grep -E "assets/(index\.html|style\.css|app\.js)"
+            echo "=== Verify Native APK Contents ==="
+            unzip -l "$APK_PATH" | grep -E "classes[0-9]*\.dex|AndroidManifest\.xml|resources\.arsc"
             echo "=== ARM64 Compatibility ==="
-            echo "APK supports arm64-v8a, armeabi-v7a, and x86_64."
+            echo "APK is pure Kotlin/Compose (no ABI-restricted native libs; compatible with arm64-v8a, armeabi-v7a, x86_64)."
           else
             echo "APK not found at $APK_PATH"
             exit 1
