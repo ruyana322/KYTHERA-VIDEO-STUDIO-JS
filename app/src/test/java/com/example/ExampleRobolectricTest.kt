@@ -75,4 +75,24 @@ class ExampleRobolectricTest {
       ),
     )
   }
+
+  @Test
+  fun `external timeline json parses into playable layers`() {
+    val raw = """
+      {
+        "title": "Cloud Motion Intro",
+        "fps": 60,
+        "duration": 6.5,
+        "tracks": [
+          { "type": "text", "text": "HELLO KYTHERA", "start": 0.0, "duration": 4.0, "color": "#00C6FF" },
+          { "type": "circle", "name": "Glow Orb", "start": 0.5, "duration": 5.5, "color": "#5B6BFF" }
+        ]
+      }
+    """.trimIndent()
+    val proj = StudioJsonSerializer.parseExternalTimelineJson(raw)
+    assertTrue(proj != null)
+    assertEquals("Cloud Motion Intro", proj?.name)
+    assertEquals(2, proj?.layers?.size)
+    assertEquals(LayerType.TEXT, proj?.layers?.first()?.type)
+  }
 }

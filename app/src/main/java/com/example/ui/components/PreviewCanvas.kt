@@ -16,7 +16,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -73,8 +72,9 @@ fun PreviewCanvas(
   previewQuality: PreviewQuality,
   isDrawMode: Boolean,
   loadedImages: Map<String, ImageBitmap>,
-  onRequestImageLoad: (String) -> Unit,
+  onRequestMediaLoad: (String, Boolean) -> Unit,
   onCommitDrawStroke: (List<DrawPointNorm>) -> Unit,
+  onDragSelectedLayer: (Float, Float) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val textMeasurer = rememberTextMeasurer()
@@ -82,8 +82,8 @@ fun PreviewCanvas(
 
   LaunchedEffect(project.layers) {
     project.layers.forEach { l ->
-      if (l.type == LayerType.IMAGE && !l.mediaUri.isNullOrBlank()) {
-        onRequestImageLoad(l.mediaUri)
+      if ((l.type == LayerType.IMAGE || l.type == LayerType.VIDEO) && !l.mediaUri.isNullOrBlank()) {
+        onRequestMediaLoad(l.mediaUri, l.type == LayerType.VIDEO)
       }
     }
   }
@@ -117,46 +117,47 @@ fun PreviewCanvas(
       Canvas(
         modifier = Modifier
           .fillMaxSize()
-          .then(
+          .pointerInput(isDrawMode, selectedLayerId) {
             if (isDrawMode) {
-              Modifier.pointerInput(isDrawMode) {
-                detectDragGestures(
-                  onDragStart = { offset ->
-                    activeStroke.clear()
-                    activeStroke.add(
-                      DrawPointNorm(
-                        (offset.x / size.width).coerceIn(0f, 1f),
-                        (offset.y / size.height).coerceIn(0f, 1f),
-                      ),
-                    )
-                  },
-                  onDrag = { change, _ ->
-                    change.consume()
-                    val pos = change.position
-                    activeStroke.add(
-                      DrawPointNorm(
-                        (pos.x / size.width).coerceIn(0f, 1f),
-                        (pos.y / size.height).coerceIn(0f, 1f),
-                      ),
-                    )
-                  },
-                  onDragEnd = {
-                    if (activeStroke.size >= 2) {
-                      onCommitDrawStroke(activeStroke.toList())
-                    }
-                    activeStroke.clear()
-                  },
-                  onDragCancel = { activeStroke.clear() },
-                )
-              }
+              detectDragGestures(
+                onDragStart = { offset ->
+                  activeStroke.clear()
+                  activeStroke.add(
+                    DrawPointNorm(
+                      (offset.x / size.width).coerceIn(0f, 1f),
+                      (offset.y / size.height).coerceIn(0f, 1f),
+                    ),
+                  )
+                },
+                onDrag = { change, _ ->
+                  change.consume()
+                  val pos = change.position
+                  activeStroke.add(
+                    DrawPointNorm(
+                      (pos.x / size.width).coerceIn(0f, 1f),
+                      (pos.y / size.height).coerceIn(0f, 1f),
+                    ),
+                  )
+                },
+                onDragEnd = {
+                  if (activeStroke.size >= 2) {
+                    onCommitDrawStroke(activeStroke.toList())
+                  }
+                  activeStroke.clear()
+                },
+                onDragCancel = { activeStroke.clear() },
+              )
             } else {
-              Modifier
-            },
-          ),
+              detectDragGestures { change, dragAmount ->
+                change.consume()
+                val normScale = 360f / minOf(size.width, size.height).coerceAtLeast(1)
+                onDragSelectedLayer(dragAmount.x * normScale * 0.45f, dragAmount.y * normScale * 0.45f)
+              }
+            }
+          },
       ) {
         drawStageBackdrop()
 
-        // Draw layers bottom-to-top (reverse list order so index 0 is foreground)
         project.layers.asReversed().forEach { layer ->
           if (!layer.visible) return@forEach
           if (currentTimeSec < layer.startSec || currentTimeSec > layer.endSec) return@forEach
@@ -171,7 +172,6 @@ fun PreviewCanvas(
           )
         }
 
-        // Live in-progress freehand stroke while drawing
         if (activeStroke.size >= 2) {
           val livePath = Path().apply {
             moveTo(activeStroke.first().x * size.width, activeStroke.first().y * size.height)
@@ -330,9 +330,9 @@ private fun DrawScope.drawStudioLayer(
             }
             drawText(textMeasurer = textMeasurer, text = layer.textContent, topLeft = topLeft, style = style)
           }
-          LayerType.IMAGE -> {
-            val boxW = size.width * 0.56f
-            val boxH = size.height * 0.42f
+          LayerType.IMAGE, LayerType.VIDEO -> {
+            val boxW = size.width * 0.64f
+            val boxH = size.height * 0.44f
             val tl = Offset(center.x - boxW / 2f, center.y - boxH / 2f)
             if (imageBitmap != null) {
               drawImage(
@@ -343,32 +343,26 @@ private fun DrawScope.drawStudioLayer(
               )
             } else {
               drawRoundRect(
-                brush = Brush.linearGradient(listOf(KytheraPeriwinkle.copy(alpha = alpha), KytheraCyan.copy(alpha = alpha))),
+                brush = Brush.linearGradient(
+                  listOf(
+                    (if (layer.type == LayerType.VIDEO) KytheraElectricBlue else KytheraPeriwinkle).copy(alpha = 0.6f * alpha),
+                    KytheraCyan.copy(alpha = 0.45f * alpha),
+                  ),
+                ),
                 topLeft = tl,
                 size = Size(boxW, boxH),
                 cornerRadius = CornerRadius(18f, 18f),
               )
             }
-          }
-          LayerType.VIDEO -> {
-            val w = size.width * 0.72f
-            val h = size.height * 0.46f
-            val tl = Offset(center.x - w / 2f, center.y - h / 2f)
-            drawRoundRect(
-              brush = Brush.linearGradient(
-                listOf(KytheraElectricBlue.copy(alpha = 0.45f * alpha), KytheraCyan.copy(alpha = 0.3f * alpha)),
-              ),
-              topLeft = tl,
-              size = Size(w, h),
-              cornerRadius = CornerRadius(20f, 20f),
-            )
-            drawRoundRect(
-              color = KytheraCyan.copy(alpha = 0.65f * alpha),
-              topLeft = tl,
-              size = Size(w, h),
-              cornerRadius = CornerRadius(20f, 20f),
-              style = Stroke(width = 2.dp.toPx()),
-            )
+            if (layer.type == LayerType.VIDEO) {
+              drawRoundRect(
+                color = KytheraCyan.copy(alpha = 0.7f * alpha),
+                topLeft = tl,
+                size = Size(boxW, boxH),
+                cornerRadius = CornerRadius(18f, 18f),
+                style = Stroke(width = 2.dp.toPx()),
+              )
+            }
           }
           LayerType.DRAW -> {
             layer.drawStrokes.forEach { stroke ->

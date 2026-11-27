@@ -10,22 +10,41 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
+data class ZipExtractResult(
+  val textFiles: Map<String, String>,
+  val binaryFiles: Map<String, Pair<String, ByteArray>>,
+)
+
 object ZipProjectHandler {
 
-  private const val MAX_ENTRY_BYTES = 2 * 1024 * 1024
-  private val ALLOWED_EXTENSIONS = setOf("html", "htm", "css", "js", "json", "svg", "txt", "md")
+  private const val MAX_ENTRY_BYTES = 4 * 1024 * 1024
+  private val TEXT_EXTENSIONS = setOf(
+    "html", "htm", "css", "js", "mjs", "cjs", "ts", "jsx",
+    "json", "svg", "txt", "md", "glsl", "vert", "frag", "xml",
+  )
+  private val BINARY_MIME_BY_EXT = mapOf(
+    "png" to "image/png",
+    "jpg" to "image/jpeg",
+    "jpeg" to "image/jpeg",
+    "webp" to "image/webp",
+    "gif" to "image/gif",
+    "woff2" to "font/woff2",
+    "ttf" to "font/ttf",
+  )
 
-  fun extractZipToJson(contentResolver: ContentResolver, uri: Uri): String {
-    val filesJson = JSONObject()
+  fun extractZip(contentResolver: ContentResolver, uri: Uri): ZipExtractResult {
+    val textFiles = linkedMapOf<String, String>()
+    val binaryFiles = linkedMapOf<String, Pair<String, ByteArray>>()
+
     contentResolver.openInputStream(uri)?.use { rawStream ->
       ZipInputStream(BufferedInputStream(rawStream)).use { zis ->
         var entry: ZipEntry? = zis.nextEntry
         while (entry != null) {
-          val entryName = entry.name
-          if (!entry.isDirectory && !entryName.contains("..") && !entryName.startsWith("/")) {
-            val ext = entryName.substringAfterLast('.', "").lowercase()
-            if (ext in ALLOWED_EXTENSIONS) {
-              val buffer = ByteArray(4096)
+          val normalized = entry.name.replace('\\', '/').trimStart('/')
+          if (!entry.isDirectory && normalized.isNotBlank() && !normalized.contains("..") && !normalized.startsWith("__MACOSX/")) {
+            val ext = normalized.substringAfterLast('.', "").lowercase()
+            if (ext in TEXT_EXTENSIONS || ext in BINARY_MIME_BY_EXT) {
+              val buffer = ByteArray(8192)
               val out = ByteArrayOutputStream()
               var totalRead = 0
               var len = zis.read(buffer)
@@ -34,9 +53,12 @@ object ZipProjectHandler {
                 totalRead += len
                 len = zis.read(buffer)
               }
-              val cleanName = entryName.substringAfterLast('/')
-              if (cleanName.isNotBlank()) {
-                filesJson.put(cleanName, out.toString(StandardCharsets.UTF_8.name()))
+              val bytes = out.toByteArray()
+              if (ext in TEXT_EXTENSIONS) {
+                textFiles[normalized] = bytes.toString(StandardCharsets.UTF_8)
+              } else {
+                val mime = BINARY_MIME_BY_EXT[ext] ?: "application/octet-stream"
+                binaryFiles[normalized] = mime to bytes
               }
             }
           }
@@ -45,7 +67,30 @@ object ZipProjectHandler {
         }
       }
     }
-    return filesJson.toString()
+
+    // Strip single common root folder (e.g., "my-project/index.html" -> "index.html")
+    val cleanedText = stripCommonRootFolder(textFiles)
+    val cleanedBinary = stripCommonRootFolder(binaryFiles)
+    return ZipExtractResult(cleanedText, cleanedBinary)
+  }
+
+  private fun <T> stripCommonRootFolder(map: Map<String, T>): Map<String, T> {
+    if (map.isEmpty()) return map
+    val keys = map.keys.toList()
+    val firstSeg = keys.first().substringBefore('/', "")
+    if (firstSeg.isEmpty() || !keys.all { it.startsWith("$firstSeg/") }) {
+      return map
+    }
+    val out = linkedMapOf<String, T>()
+    map.forEach { (k, v) -> out[k.removePrefix("$firstSeg/")] = v }
+    return out
+  }
+
+  fun extractZipToJson(contentResolver: ContentResolver, uri: Uri): String {
+    val result = extractZip(contentResolver, uri)
+    return JSONObject().apply {
+      result.textFiles.forEach { (k, v) -> put(k, v) }
+    }.toString()
   }
 
   fun writeZipFromJson(contentResolver: ContentResolver, uri: Uri, filesJsonString: String) {

@@ -17,21 +17,33 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Circle
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.RoundedCorner
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -45,14 +57,166 @@ import com.example.model.LayerTrack
 import com.example.model.LayerType
 import com.example.model.ShapeKind
 import com.example.ui.theme.JetBrainsMonoFamily
-import com.example.ui.theme.KytheraCoral
 import com.example.ui.theme.KytheraCrimson
-import com.example.ui.theme.KytheraCyan
 import com.example.ui.theme.KytheraElectricBlue
-import com.example.ui.theme.KytheraMint
 import com.example.ui.theme.KytheraPeriwinkle
 import com.example.ui.theme.KytheraViolet
 import com.example.ui.theme.LocalKytheraGlass
+import kotlin.math.roundToInt
+
+private val STUDIO_COLORS = listOf(
+  0xFFF3F6FFL,
+  0xFF5B6BFFL,
+  0xFF00C6FFL,
+  0xFF9C6BFFL,
+  0xFFFF7A64L,
+  0xFF00C48CL,
+)
+
+@Composable
+fun AddTextDialog(
+  onAdd: (text: String, fontSizeSp: Float, colorHex: Long) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val glass = LocalKytheraGlass.current
+  var text by remember { mutableStateOf("KYTHERA") }
+  var fontSize by remember { mutableFloatStateOf(34f) }
+  var colorHex by remember { mutableLongStateOf(0xFFF3F6FFL) }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text("Add Text Layer", style = MaterialTheme.typography.titleLarge) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedTextField(
+          value = text,
+          onValueChange = { text = it },
+          label = { Text("Enter Text") },
+          singleLine = true,
+          modifier = Modifier.fillMaxWidth().testTag("add_text_input"),
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+          Text("Text Size", style = MaterialTheme.typography.labelMedium, color = glass.textSecondary)
+          Text("${fontSize.roundToInt()} sp", fontFamily = JetBrainsMonoFamily, fontSize = 11.sp, color = KytheraPeriwinkle)
+        }
+        Slider(
+          value = fontSize,
+          onValueChange = { fontSize = it },
+          valueRange = 18f..64f,
+          colors = SliderDefaults.colors(thumbColor = KytheraPeriwinkle, activeTrackColor = KytheraPeriwinkle),
+        )
+        Text("Text Color", style = MaterialTheme.typography.labelMedium, color = glass.textSecondary)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          STUDIO_COLORS.forEach { hex ->
+            Box(
+              modifier = Modifier
+                .size(30.dp)
+                .clip(CircleShape)
+                .background(Color(hex))
+                .border(
+                  width = if (colorHex == hex) 2.5.dp else 1.dp,
+                  color = if (colorHex == hex) KytheraPeriwinkle else Color.White,
+                  shape = CircleShape,
+                )
+                .clickable { colorHex = hex },
+            )
+          }
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = { onAdd(text.trim().ifEmpty { "TEXT" }, fontSize, colorHex) },
+        colors = ButtonDefaults.buttonColors(containerColor = KytheraPeriwinkle),
+        modifier = Modifier.testTag("confirm_add_text"),
+      ) {
+        Text("Add Text")
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) { Text("Cancel") }
+    },
+  )
+}
+
+@Composable
+fun ShapePickerDialog(
+  onPickShape: (ShapeKind, Long) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val glass = LocalKytheraGlass.current
+  var selectedShape by remember { mutableStateOf(ShapeKind.ROUNDED_RECT) }
+  var colorHex by remember { mutableLongStateOf(0xFF00C6FFL) }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text("Choose Shape", style = MaterialTheme.typography.titleLarge) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          ShapeKind.entries.forEach { kind ->
+            val sel = kind == selectedShape
+            val icon = when (kind) {
+              ShapeKind.ROUNDED_RECT -> Icons.Filled.RoundedCorner
+              ShapeKind.CIRCLE -> Icons.Filled.Circle
+              ShapeKind.RING -> Icons.Filled.RadioButtonUnchecked
+              ShapeKind.STAR -> Icons.Filled.Star
+              ShapeKind.WAVE -> Icons.Filled.Waves
+            }
+            Surface(
+              modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .clickable { selectedShape = kind }
+                .testTag("pick_shape_${kind.name.lowercase()}"),
+              color = if (sel) KytheraPeriwinkle else glass.glassSurface,
+              border = BorderStroke(1.dp, if (sel) KytheraPeriwinkle else glass.subtleBorder),
+              shape = RoundedCornerShape(12.dp),
+            ) {
+              Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+              ) {
+                Icon(icon, contentDescription = kind.label, tint = if (sel) Color.White else Color(colorHex), modifier = Modifier.size(20.dp))
+                Text(kind.label, fontWeight = FontWeight.SemiBold, color = if (sel) Color.White else glass.textPrimary)
+              }
+            }
+          }
+        }
+        Text("Shape Color", style = MaterialTheme.typography.labelMedium, color = glass.textSecondary)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          STUDIO_COLORS.forEach { hex ->
+            Box(
+              modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(Color(hex))
+                .border(
+                  width = if (colorHex == hex) 2.5.dp else 1.dp,
+                  color = if (colorHex == hex) KytheraPeriwinkle else Color.White,
+                  shape = CircleShape,
+                )
+                .clickable { colorHex = hex },
+            )
+          }
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = { onPickShape(selectedShape, colorHex) },
+        colors = ButtonDefaults.buttonColors(containerColor = KytheraPeriwinkle),
+        modifier = Modifier.testTag("confirm_add_shape"),
+      ) {
+        Text("Add Shape")
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) { Text("Cancel") }
+    },
+  )
+}
 
 @Composable
 fun NewProjectDialog(
@@ -163,17 +327,8 @@ fun LayerSettingsDialog(
   val glass = LocalKytheraGlass.current
   var name by remember(layer.id) { mutableStateOf(layer.name) }
   var textContent by remember(layer.id) { mutableStateOf(layer.textContent) }
-  var colorHex by remember(layer.id) { mutableStateOf(layer.colorHex) }
+  var colorHex by remember(layer.id) { mutableLongStateOf(layer.colorHex) }
   var shapeKind by remember(layer.id) { mutableStateOf(layer.shapeKind) }
-
-  val palette = listOf(
-    0xFF5B6BFFL,
-    0xFF00C6FFL,
-    0xFF9C6BFFL,
-    0xFFFF7A64L,
-    0xFF00C48CL,
-    0xFFF3F6FFL,
-  )
 
   AlertDialog(
     onDismissRequest = onDismiss,
@@ -222,7 +377,7 @@ fun LayerSettingsDialog(
         }
         Text("Layer Color", style = MaterialTheme.typography.labelMedium, color = glass.textSecondary)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          palette.forEach { hex ->
+          STUDIO_COLORS.forEach { hex ->
             Box(
               modifier = Modifier
                 .size(30.dp)

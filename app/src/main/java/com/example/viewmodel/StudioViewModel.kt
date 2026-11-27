@@ -3,6 +3,7 @@ package com.example.viewmodel
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaPlayer
 import android.net.Uri
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -11,7 +12,10 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.ProjectRepository
 import com.example.media.DeviceDiagnostics
 import com.example.media.MediaCodecCapabilityInspector
+import com.example.media.NativeMp4Exporter
 import com.example.media.RenderSpec
+import com.example.media.VideoFrameExtractor
+import com.example.media.ZipExtractResult
 import com.example.model.AnimationProperty
 import com.example.model.AppliedEffect
 import com.example.model.AspectRatioOption
@@ -44,6 +48,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import kotlin.math.abs
 
 data class StudioUiState(
@@ -58,6 +63,8 @@ data class StudioUiState(
   val isDrawMode: Boolean = false,
   val darkGlassMode: Boolean = false,
   val showNewProjectDialog: Boolean = false,
+  val showAddTextDialog: Boolean = false,
+  val showShapePickerDialog: Boolean = false,
   val showAnimationSheet: Boolean = false,
   val showEffectsSheet: Boolean = false,
   val showLayerSettingsDialog: Boolean = false,
@@ -68,10 +75,14 @@ data class StudioUiState(
   val exportConfig: ExportConfig = ExportConfig(),
   val isExporting: Boolean = false,
   val exportProgress: Float = 0f,
+  val exportFrameStatus: String = "",
   val exportCompleteMessage: String? = null,
+  val renderedMp4Path: String? = null,
   val jsPreset: JsPresetKind = JsPresetKind.CYBER_PULSE,
   val jsFiles: Map<String, String> = emptyMap(),
+  val jsBinaryFiles: Map<String, Pair<String, ByteArray>> = emptyMap(),
   val jsActiveFile: String = "app.js",
+  val jsRunRevision: Int = 1,
   val jsConsoleLogs: List<String> = listOf("[Kythera JS] Runtime sandbox ready @ 60 FPS"),
   val jsPlaying: Boolean = true,
   val canUndo: Boolean = false,
@@ -92,12 +103,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
   private val repository = ProjectRepository(application.applicationContext)
   private val mediaEngine = MediaCodecCapabilityInspector()
+  private val mp4Exporter = NativeMp4Exporter(application.applicationContext)
+
+  private val rawBitmaps = mutableMapOf<String, Bitmap>()
+  private var audioPlayer: MediaPlayer? = null
+  private var activeAudioUri: String? = null
 
   private val undoStack = ArrayDeque<StudioProject>()
   private val redoStack = ArrayDeque<StudioProject>()
 
   private var playbackJob: Job? = null
   private var exportJob: Job? = null
+  @Volatile private var exportCancelRequested = false
 
   private val _uiState = MutableStateFlow(StudioUiState())
   val uiState: StateFlow<StudioUiState> = _uiState.asStateFlow()
@@ -114,6 +131,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
       jsFiles = defaultFiles,
       diagnostics = diagnostics,
     )
+  }
+
+  override fun onCleared() {
+    super.onCleared()
+    releaseAudioPlayer()
+  }
+
+  private fun releaseAudioPlayer() {
+    runCatching { audioPlayer?.stop() }
+    runCatching { audioPlayer?.release() }
+    audioPlayer = null
+    activeAudioUri = null
   }
 
   fun selectTab(tab: StudioTab) {
@@ -147,6 +176,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
   fun setShowNewProjectDialog(show: Boolean) {
     _uiState.update { it.copy(showNewProjectDialog = show) }
+  }
+
+  fun setShowAddTextDialog(show: Boolean) {
+    _uiState.update { it.copy(showAddTextDialog = show) }
+  }
+
+  fun setShowShapePickerDialog(show: Boolean) {
+    _uiState.update { it.copy(showShapePickerDialog = show) }
   }
 
   fun setShowAnimationSheet(show: Boolean) {
@@ -190,8 +227,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
           name = "Title Layer",
           type = LayerType.TEXT,
           startSec = 0f,
-          durationSec = 6.0f,
-          colorHex = 0xFF5B6BFF,
+          durationSec = 8.0f,
+          colorHex = 0xFFF3F6FF,
           textContent = cleanName.uppercase(),
           fontSizeSp = 32f,
         ),
@@ -201,7 +238,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
           type = LayerType.SHAPE,
           startSec = 0f,
           durationSec = 8.0f,
-          colorHex = 0xFF00C6FF,
+          colorHex = 0xFF5B6BFF,
           shapeKind = ShapeKind.CIRCLE,
           effects = listOf(
             AppliedEffect("electric_glow", "Electric Glow", EffectCategory.GLOW, "Intensity", 0f, 40f, 18f),
@@ -338,7 +375,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
   fun scrubTo(timeSec: Float) {
     val maxDur = _uiState.value.activeProject?.durationSec ?: 8f
-    _uiState.update { it.copy(currentTimeSec = timeSec.coerceIn(0f, maxDur)) }
+    val clamped = timeSec.coerceIn(0f, maxDur)
+    _uiState.update { it.copy(currentTimeSec = clamped) }
+    runCatching {
+      audioPlayer?.let { mp ->
+        if (!mp.isPlaying) {
+          mp.seekTo((clamped * 1000).toInt().coerceIn(0, mp.duration.coerceAtLeast(1)))
+        }
+      }
+    }
   }
 
   fun adjustTimelineZoom(delta: Float) {
@@ -355,6 +400,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
   private fun startPlayback() {
     playbackJob?.cancel()
+    syncAudioPlaybackStart()
     _uiState.update { it.copy(isPlaying = true) }
     playbackJob = viewModelScope.launch {
       var lastNs = System.nanoTime()
@@ -365,9 +411,35 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         lastNs = nowNs
         val maxDur = _uiState.value.activeProject?.durationSec ?: 8f
         val nextTime = _uiState.value.currentTimeSec + dt
-        _uiState.update {
-          it.copy(currentTimeSec = if (nextTime >= maxDur) 0f else nextTime)
+        val wrapped = if (nextTime >= maxDur) 0f else nextTime
+        if (wrapped == 0f) {
+          runCatching { audioPlayer?.seekTo(0) }
         }
+        _uiState.update { it.copy(currentTimeSec = wrapped) }
+      }
+    }
+  }
+
+  private fun syncAudioPlaybackStart() {
+    val audioLayer = _uiState.value.activeProject?.layers?.firstOrNull {
+      it.type == LayerType.AUDIO && it.visible && !it.mediaUri.isNullOrBlank()
+    } ?: return
+    val uriStr = audioLayer.mediaUri ?: return
+    runCatching {
+      if (activeAudioUri != uriStr || audioPlayer == null) {
+        releaseAudioPlayer()
+        val mp = MediaPlayer().apply {
+          setDataSource(getApplication(), Uri.parse(uriStr))
+          isLooping = true
+          prepare()
+        }
+        audioPlayer = mp
+        activeAudioUri = uriStr
+      }
+      audioPlayer?.let { mp ->
+        val targetMs = ((_uiState.value.currentTimeSec - audioLayer.startSec).coerceAtLeast(0f) * 1000).toInt()
+        mp.seekTo(targetMs.coerceIn(0, mp.duration.coerceAtLeast(1)))
+        mp.start()
       }
     }
   }
@@ -375,6 +447,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
   fun pausePlayback() {
     playbackJob?.cancel()
     playbackJob = null
+    runCatching { if (audioPlayer?.isPlaying == true) audioPlayer?.pause() }
     _uiState.update { it.copy(isPlaying = false) }
   }
 
@@ -382,13 +455,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     type: LayerType,
     name: String,
     textContent: String = "MOTION",
+    fontSizeSp: Float = 32f,
     shapeKind: ShapeKind = ShapeKind.ROUNDED_RECT,
     mediaUri: String? = null,
     colorHex: Long = type.accentHex,
+    initialOffsetY: Float = 0f,
   ) {
-    val start = (_uiState.value.currentTimeSec * 0.5f).coerceAtMost(4f)
     val projDur = _uiState.value.activeProject?.durationSec ?: 8f
-    val dur = (projDur - start).coerceIn(2f, 6f)
+    val start = 0f
+    val dur = projDur.coerceAtLeast(2f)
     val newLayer = LayerTrack(
       id = "layer_${System.currentTimeMillis()}",
       name = name,
@@ -397,8 +472,10 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
       durationSec = dur,
       colorHex = colorHex,
       textContent = textContent,
+      fontSizeSp = fontSizeSp,
       shapeKind = shapeKind,
       mediaUri = mediaUri,
+      positionKeys = listOf(Keyframe2D(0f, 0f, initialOffsetY)),
     )
     mutateActiveProject { proj ->
       proj.copy(layers = listOf(newLayer) + proj.layers)
@@ -407,20 +484,25 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
       it.copy(
         selectedLayerId = newLayer.id,
         isDrawMode = type == LayerType.DRAW,
+        showAddTextDialog = false,
+        showShapePickerDialog = false,
         toastMessage = "Added ${type.label}: $name",
       )
     }
   }
 
   fun addPickedMediaLayer(uri: Uri, displayName: String, isVideo: Boolean) {
-    if (!isVideo) {
-      viewModelScope.launch(Dispatchers.IO) {
-        val bmp = decodeBitmapThumbnail(uri)
-        if (bmp != null) {
-          withContext(Dispatchers.Main) {
-            _uiState.update {
-              it.copy(loadedImages = it.loadedImages + (uri.toString() to bmp.asImageBitmap()))
-            }
+    viewModelScope.launch(Dispatchers.IO) {
+      val bmp = if (isVideo) {
+        VideoFrameExtractor.extractThumbnail(getApplication(), uri)
+      } else {
+        decodeBitmapThumbnail(uri)
+      }
+      if (bmp != null) {
+        rawBitmaps[uri.toString()] = bmp
+        withContext(Dispatchers.Main) {
+          _uiState.update {
+            it.copy(loadedImages = it.loadedImages + (uri.toString() to bmp.asImageBitmap()))
           }
         }
       }
@@ -429,6 +511,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
       type = if (isVideo) LayerType.VIDEO else LayerType.IMAGE,
       name = displayName,
       mediaUri = uri.toString(),
+    )
+  }
+
+  fun addPickedAudioLayer(uri: Uri, displayName: String) {
+    addLayer(
+      type = LayerType.AUDIO,
+      name = displayName,
+      mediaUri = uri.toString(),
+      colorHex = 0xFF00C48C,
     )
   }
 
@@ -441,15 +532,43 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }.getOrNull()
   }
 
-  fun ensureImageLoaded(uriString: String) {
+  fun ensureMediaLoaded(uriString: String, isVideo: Boolean) {
     if (_uiState.value.loadedImages.containsKey(uriString)) return
     viewModelScope.launch(Dispatchers.IO) {
-      val bmp = runCatching { decodeBitmapThumbnail(Uri.parse(uriString)) }.getOrNull() ?: return@launch
+      val uri = Uri.parse(uriString)
+      val bmp = if (isVideo) {
+        VideoFrameExtractor.extractThumbnail(getApplication(), uri)
+      } else {
+        decodeBitmapThumbnail(uri)
+      } ?: return@launch
+      rawBitmaps[uriString] = bmp
       withContext(Dispatchers.Main) {
         _uiState.update {
           it.copy(loadedImages = it.loadedImages + (uriString to bmp.asImageBitmap()))
         }
       }
+    }
+  }
+
+  fun nudgeSelectedLayerPosition(dxPx: Float, dyPx: Float) {
+    val state = _uiState.value
+    val layer = state.selectedLayer ?: return
+    if (layer.locked) return
+    val eval = evaluateLayerAt(layer, state.currentTimeSec)
+    val localT = ((state.currentTimeSec - layer.startSec).coerceAtLeast(0f) * 100f).toInt() / 100f
+    val newX = (eval.posX + dxPx).coerceIn(-300f, 300f)
+    val newY = (eval.posY + dyPx).coerceIn(-300f, 300f)
+
+    mutateActiveProject(recordUndo = false) { proj ->
+      proj.copy(
+        layers = proj.layers.map { l ->
+          if (l.id != layer.id) return@map l
+          val updated = l.positionKeys.toMutableList()
+          val idx = updated.indexOfFirst { abs(it.timeSec - localT) < 0.08f }
+          if (idx >= 0) updated[idx] = Keyframe2D(localT, newX, newY) else updated.add(Keyframe2D(localT, newX, newY))
+          l.copy(positionKeys = updated.sortedBy { it.timeSec })
+        },
+      )
     }
   }
 
@@ -693,12 +812,12 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
   }
 
-  fun startSimulatedExport() {
+  fun startRealMp4Export() {
     val proj = _uiState.value.activeProject ?: return
     val cfg = _uiState.value.exportConfig
     val aspect = proj.aspectRatio
-    val heightPx = cfg.resolution.heightPx
-    val widthPx = (heightPx * aspect.wRatio / aspect.hRatio).coerceAtLeast(360)
+    val heightPx = cfg.resolution.heightPx.coerceAtMost(1920)
+    val widthPx = (heightPx * aspect.wRatio / aspect.hRatio).coerceIn(320, 1920)
 
     val prepared = mediaEngine.prepareRenderSession(
       RenderSpec(
@@ -716,29 +835,82 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     exportJob?.cancel()
+    exportCancelRequested = false
     _uiState.update {
-      it.copy(isExporting = true, exportProgress = 0f, exportCompleteMessage = null)
+      it.copy(
+        isExporting = true,
+        exportProgress = 0f,
+        exportFrameStatus = "Initializing MediaCodec H.264...",
+        exportCompleteMessage = null,
+        renderedMp4Path = null,
+      )
     }
-    exportJob = viewModelScope.launch {
-      val steps = 45
-      for (i in 1..steps) {
-        delay(55L)
-        _uiState.update { it.copy(exportProgress = i / steps.toFloat()) }
-      }
-      _uiState.update {
-        it.copy(
-          isExporting = false,
-          exportProgress = 1f,
-          exportCompleteMessage = "Rendered ${proj.name} (${widthPx}×$heightPx @ ${cfg.fps} FPS · ${cfg.format.label})",
-          toastMessage = "Render pipeline preview complete",
+
+    exportJob = viewModelScope.launch(Dispatchers.Default) {
+      runCatching {
+        mp4Exporter.exportProjectToMp4(
+          project = proj,
+          widthPx = widthPx,
+          heightPx = heightPx,
+          fps = cfg.fps,
+          bitrateMbps = cfg.bitrateMbps,
+          loadedBitmaps = rawBitmaps.toMap(),
+          onProgress = { pct, frame, total ->
+            _uiState.update {
+              it.copy(
+                exportProgress = pct,
+                exportFrameStatus = "Encoding frame $frame / $total (${cfg.fps} FPS)",
+              )
+            }
+          },
+          isCancelled = { exportCancelRequested },
         )
+      }.onSuccess { mp4File ->
+        val sizeKb = (mp4File.length() / 1024L).coerceAtLeast(1L)
+        withContext(Dispatchers.Main) {
+          _uiState.update {
+            it.copy(
+              isExporting = false,
+              exportProgress = 1f,
+              exportFrameStatus = "MP4 ready ($sizeKb KB)",
+              renderedMp4Path = mp4File.absolutePath,
+              exportCompleteMessage = "Encoded ${proj.name} (${mp4File.name} · ${sizeKb} KB). Tap Save MP4 to export to storage.",
+              toastMessage = "MP4 render complete ($sizeKb KB)",
+            )
+          }
+        }
+      }.onFailure { err ->
+        withContext(Dispatchers.Main) {
+          _uiState.update {
+            it.copy(
+              isExporting = false,
+              exportProgress = 0f,
+              exportFrameStatus = "",
+              toastMessage = if (exportCancelRequested) "Render cancelled" else "Render error: ${err.message}",
+            )
+          }
+        }
       }
     }
   }
 
   fun cancelExport() {
+    exportCancelRequested = true
     exportJob?.cancel()
-    _uiState.update { it.copy(isExporting = false, exportProgress = 0f, toastMessage = "Render cancelled") }
+    _uiState.update {
+      it.copy(
+        isExporting = false,
+        exportProgress = 0f,
+        exportFrameStatus = "",
+        toastMessage = "Render cancelled",
+      )
+    }
+  }
+
+  fun getRenderedMp4File(): File? {
+    val path = _uiState.value.renderedMp4Path ?: return null
+    val f = File(path)
+    return if (f.exists()) f else null
   }
 
   fun selectJsFile(fileName: String) {
@@ -776,7 +948,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
       it.copy(
         jsPreset = nextPreset,
         jsFiles = nextFiles,
+        jsBinaryFiles = emptyMap(),
         jsActiveFile = "app.js",
+        jsRunRevision = it.jsRunRevision + 1,
         jsConsoleLogs = it.jsConsoleLogs + "[Preset] Switched to ${nextPreset.title}",
       )
     }
@@ -787,9 +961,16 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     _uiState.update {
       it.copy(
         jsPlaying = true,
-        jsConsoleLogs = (it.jsConsoleLogs + "[Render] Evaluated $active @ 60 FPS native preview").takeLast(20),
-        toastMessage = "JS Animation preview updated",
+        jsRunRevision = it.jsRunRevision + 1,
+        jsConsoleLogs = (it.jsConsoleLogs + "[Render] Executing live preview ($active)").takeLast(30),
+        toastMessage = "Running live JS preview",
       )
+    }
+  }
+
+  fun appendJsConsoleLog(line: String) {
+    _uiState.update {
+      it.copy(jsConsoleLogs = (it.jsConsoleLogs + line).takeLast(30))
     }
   }
 
@@ -798,6 +979,26 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   fun sendJsAnimationToTimeline() {
+    val timelineKey = _uiState.value.jsFiles.keys.firstOrNull { it.endsWith("timeline.json", ignoreCase = true) }
+    val timelineRaw = timelineKey?.let { _uiState.value.jsFiles[it] }
+    if (!timelineRaw.isNullOrBlank()) {
+      val parsed = StudioJsonSerializer.parseExternalTimelineJson(timelineRaw, "Imported Timeline")
+      if (parsed != null) {
+        val next = listOf(parsed) + _uiState.value.projects
+        repository.saveProjects(next)
+        _uiState.update {
+          it.copy(
+            projects = next,
+            activeProjectId = parsed.id,
+            selectedLayerId = parsed.layers.firstOrNull()?.id,
+            activeTab = StudioTab.EDITOR,
+            toastMessage = "Imported ${parsed.layers.size} layers from timeline.json",
+          )
+        }
+        return
+      }
+    }
+
     val preset = _uiState.value.jsPreset
     val kind = if (preset == JsPresetKind.CYBER_PULSE) ShapeKind.RING else ShapeKind.WAVE
     addLayer(
@@ -810,50 +1011,51 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
   }
 
   fun importProjectJson(rawJson: String) {
-    runCatching {
-      val imported = StudioJsonSerializer.projectsFromJson(rawJson)
-      if (imported.isEmpty()) error("Empty project payload")
-      val next = imported + _uiState.value.projects
-      repository.saveProjects(next)
-      _uiState.update {
-        it.copy(
-          projects = next,
-          activeProjectId = imported.first().id,
-          selectedLayerId = imported.first().layers.firstOrNull()?.id,
-          activeTab = StudioTab.EDITOR,
-          toastMessage = "Imported ${imported.first().name}",
-        )
-      }
-    }.onFailure {
-      showToast("Invalid .kythera.json project file")
+    val direct = runCatching { StudioJsonSerializer.projectsFromJson(rawJson) }.getOrDefault(emptyList())
+    val resolved = if (direct.isNotEmpty() && direct.first().layers.isNotEmpty()) {
+      direct
+    } else {
+      listOfNotNull(StudioJsonSerializer.parseExternalTimelineJson(rawJson))
+    }
+    if (resolved.isEmpty()) {
+      showToast("Invalid project / timeline JSON file")
+      return
+    }
+    val next = resolved + _uiState.value.projects
+    repository.saveProjects(next)
+    _uiState.update {
+      it.copy(
+        projects = next,
+        activeProjectId = resolved.first().id,
+        selectedLayerId = resolved.first().layers.firstOrNull()?.id,
+        activeTab = StudioTab.EDITOR,
+        toastMessage = "Imported ${resolved.first().name}",
+      )
     }
   }
 
-  fun importZipFilesJson(extractedJson: String) {
-    runCatching {
-      val obj = JSONObject(extractedJson)
-      val map = linkedMapOf<String, String>()
-      val keys = obj.keys()
-      while (keys.hasNext()) {
-        val k = keys.next()
-        map[k] = obj.optString(k, "")
-      }
-      if (map.isEmpty()) {
-        showToast("ZIP archive contained no supported files")
-        return
-      }
-      val primary = map.keys.firstOrNull { it.endsWith(".js") } ?: map.keys.first()
-      _uiState.update {
-        it.copy(
-          jsFiles = map,
-          jsActiveFile = primary,
-          activeTab = StudioTab.SCRIPTS,
-          jsConsoleLogs = it.jsConsoleLogs + "[ZIP] Imported ${map.size} files from archive",
-          toastMessage = "Imported ${map.size} files into JS Studio",
-        )
-      }
-    }.onFailure {
-      showToast("Failed to read ZIP files")
+  fun importZipExtractResult(result: ZipExtractResult) {
+    if (result.textFiles.isEmpty() && result.binaryFiles.isEmpty()) {
+      showToast("ZIP archive contained no supported HTML/JS/JSON/media files")
+      return
+    }
+    val preferred = result.textFiles.keys.firstOrNull { it.endsWith("index.html", ignoreCase = true) }
+      ?: result.textFiles.keys.firstOrNull { it.endsWith(".js", ignoreCase = true) }
+      ?: result.textFiles.keys.firstOrNull { it.endsWith("timeline.json", ignoreCase = true) }
+      ?: result.textFiles.keys.firstOrNull()
+      ?: ""
+
+    val fileSummary = (result.textFiles.keys + result.binaryFiles.keys).joinToString(", ")
+    _uiState.update {
+      it.copy(
+        jsFiles = result.textFiles,
+        jsBinaryFiles = result.binaryFiles,
+        jsActiveFile = preferred,
+        jsRunRevision = it.jsRunRevision + 1,
+        activeTab = StudioTab.SCRIPTS,
+        jsConsoleLogs = (it.jsConsoleLogs + "[ZIP] Loaded ${result.textFiles.size} code/JSON & ${result.binaryFiles.size} asset files: $fileSummary").takeLast(30),
+        toastMessage = "Imported ${result.textFiles.size + result.binaryFiles.size} files from ZIP",
+      )
     }
   }
 

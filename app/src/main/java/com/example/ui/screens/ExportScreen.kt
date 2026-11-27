@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MovieCreation
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -69,6 +70,7 @@ fun ExportScreen(
   onUpdateFormat: (ExportFormat) -> Unit,
   onStartExport: () -> Unit,
   onCancelExport: () -> Unit,
+  onSaveMp4: () -> Unit,
   onExportJson: () -> Unit,
   bottomContentPadding: PaddingValues,
   modifier: Modifier = Modifier,
@@ -116,7 +118,6 @@ fun ExportScreen(
       }
     }
 
-    // Progress Ring Glass Card (inspired by reference 2 & 4 circular chart)
     item {
       GlassCard(cornerRadius = 22.dp, elevated = true, contentPadding = 16.dp) {
         Row(
@@ -154,7 +155,7 @@ fun ExportScreen(
                 color = glass.textPrimary,
               )
               Text(
-                text = if (uiState.isExporting) "Rendering" else "${cfg.fps} FPS",
+                text = if (uiState.isExporting) "Encoding" else "${cfg.fps} FPS",
                 fontSize = 10.sp,
                 color = glass.textSecondary,
               )
@@ -168,7 +169,8 @@ fun ExportScreen(
               color = glass.textPrimary,
             )
             Text(
-              text = "Bitrate ${cfg.bitrateMbps} Mbps · Est. ~$estMb MB",
+              text = if (uiState.exportFrameStatus.isNotBlank()) uiState.exportFrameStatus
+              else "Bitrate ${cfg.bitrateMbps} Mbps · Est. ~$estMb MB",
               fontFamily = JetBrainsMonoFamily,
               fontSize = 11.sp,
               color = glass.textSecondary,
@@ -184,7 +186,6 @@ fun ExportScreen(
       }
     }
 
-    // Resolution & FPS Selection
     item {
       GlassCard(cornerRadius = 20.dp, contentPadding = 14.dp) {
         Text("Resolution", style = MaterialTheme.typography.titleMedium, color = glass.textPrimary)
@@ -202,14 +203,15 @@ fun ExportScreen(
               border = BorderStroke(1.dp, if (sel) KytheraPeriwinkle else glass.subtleBorder),
               shape = RoundedCornerShape(12.dp),
             ) {
-              Text(
-                text = res.label,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = if (sel) Color.White else glass.textPrimary,
-                modifier = Modifier.padding(vertical = 10.dp).let { it },
-              )
+              Box(modifier = Modifier.padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                Text(
+                  text = res.label,
+                  fontFamily = JetBrainsMonoFamily,
+                  fontSize = 12.sp,
+                  fontWeight = FontWeight.Bold,
+                  color = if (sel) Color.White else glass.textPrimary,
+                )
+              }
             }
           }
         }
@@ -298,35 +300,48 @@ fun ExportScreen(
       }
     }
 
-    // Action Buttons
     item {
-      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (uiState.isExporting) {
-          OutlinedButton(
-            onClick = onCancelExport,
-            border = BorderStroke(1.dp, KytheraCrimson),
-            modifier = Modifier.weight(1f).height(50.dp).testTag("export_cancel_button"),
-          ) {
-            Text("Cancel Render", color = KytheraCrimson, fontWeight = FontWeight.Bold)
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+          if (uiState.isExporting) {
+            OutlinedButton(
+              onClick = onCancelExport,
+              border = BorderStroke(1.dp, KytheraCrimson),
+              modifier = Modifier.weight(1f).height(50.dp).testTag("export_cancel_button"),
+            ) {
+              Text("Cancel Render", color = KytheraCrimson, fontWeight = FontWeight.Bold)
+            }
+          } else {
+            Button(
+              onClick = onStartExport,
+              colors = ButtonDefaults.buttonColors(containerColor = KytheraPeriwinkle),
+              shape = RoundedCornerShape(16.dp),
+              modifier = Modifier.weight(1f).height(50.dp).testTag("export_start_button"),
+            ) {
+              Icon(Icons.Filled.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
+              Text(" Render MP4", fontWeight = FontWeight.Bold)
+            }
           }
-        } else {
-          Button(
-            onClick = onStartExport,
-            colors = ButtonDefaults.buttonColors(containerColor = KytheraPeriwinkle),
+          OutlinedButton(
+            onClick = onExportJson,
             shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.weight(1f).height(50.dp).testTag("export_start_button"),
+            modifier = Modifier.height(50.dp).testTag("export_json_button"),
           ) {
-            Icon(Icons.Filled.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
-            Text(" Render Video", fontWeight = FontWeight.Bold)
+            Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(17.dp))
+            Text(" JSON")
           }
         }
-        OutlinedButton(
-          onClick = onExportJson,
-          shape = RoundedCornerShape(16.dp),
-          modifier = Modifier.height(50.dp).testTag("export_json_button"),
-        ) {
-          Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(17.dp))
-          Text(" JSON")
+
+        if (uiState.renderedMp4Path != null && !uiState.isExporting) {
+          Button(
+            onClick = onSaveMp4,
+            colors = ButtonDefaults.buttonColors(containerColor = KytheraMint),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().height(50.dp).testTag("export_save_mp4_button"),
+          ) {
+            Icon(Icons.Filled.SaveAlt, contentDescription = null, tint = Color.White)
+            Text(" Save Rendered MP4 to Storage", color = Color.White, fontWeight = FontWeight.Bold)
+          }
         }
       }
     }

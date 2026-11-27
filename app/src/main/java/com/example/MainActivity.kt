@@ -35,9 +35,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.example.media.ZipExtractResult
 import com.example.media.ZipProjectHandler
 import com.example.model.LayerType
-import com.example.model.ShapeKind
 import com.example.model.StudioTab
 import com.example.ui.components.AmbientGlassBackground
 import com.example.ui.components.FrostedFloatingBottomBar
@@ -46,11 +46,13 @@ import com.example.ui.screens.EditorScreen
 import com.example.ui.screens.ExportScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.JsStudioScreen
+import com.example.ui.sheets.AddTextDialog
 import com.example.ui.sheets.AnimationSheet
 import com.example.ui.sheets.DiagnosticsDialog
 import com.example.ui.sheets.EffectsSheet
 import com.example.ui.sheets.LayerSettingsDialog
 import com.example.ui.sheets.NewProjectDialog
+import com.example.ui.sheets.ShapePickerDialog
 import com.example.ui.theme.KytheraPeriwinkle
 import com.example.ui.theme.KytheraStudioTheme
 import com.example.viewmodel.StudioViewModel
@@ -76,16 +78,25 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  private val audioOpenLauncher = registerForActivityResult(
+    ActivityResultContracts.OpenDocument(),
+  ) { uri ->
+    if (uri != null) {
+      val displayName = queryDisplayName(uri) ?: "Audio Track.mp3"
+      viewModel.addPickedAudioLayer(uri, displayName)
+    }
+  }
+
   private val zipOpenLauncher = registerForActivityResult(
     ActivityResultContracts.OpenDocument(),
   ) { uri ->
     if (uri != null) {
       lifecycleScope.launch(Dispatchers.IO) {
-        val extractedJson = runCatching {
-          ZipProjectHandler.extractZipToJson(contentResolver, uri)
-        }.getOrDefault("{}")
+        val result = runCatching {
+          ZipProjectHandler.extractZip(contentResolver, uri)
+        }.getOrDefault(ZipExtractResult(emptyMap(), emptyMap()))
         withContext(Dispatchers.Main) {
-          viewModel.importZipFilesJson(extractedJson)
+          viewModel.importZipExtractResult(result)
         }
       }
     }
@@ -145,6 +156,29 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  private val mp4CreateLauncher = registerForActivityResult(
+    ActivityResultContracts.CreateDocument("video/mp4"),
+  ) { uri ->
+    val srcFile = viewModel.getRenderedMp4File()
+    if (uri != null && srcFile != null) {
+      lifecycleScope.launch(Dispatchers.IO) {
+        runCatching {
+          contentResolver.openOutputStream(uri)?.use { out ->
+            srcFile.inputStream().use { input -> input.copyTo(out) }
+          }
+        }.onSuccess {
+          withContext(Dispatchers.Main) {
+            viewModel.showToast("Saved MP4 to device storage")
+          }
+        }.onFailure { err ->
+          withContext(Dispatchers.Main) {
+            viewModel.showToast("Failed to save MP4: ${err.message}")
+          }
+        }
+      }
+    }
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge(
@@ -163,12 +197,15 @@ class MainActivity : ComponentActivity() {
               PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
             )
           },
+          onPickAudio = {
+            audioOpenLauncher.launch(arrayOf("audio/*"))
+          },
           onImportProject = {
             projectOpenLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
           },
           onImportZip = {
             zipOpenLauncher.launch(
-              arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"),
+              arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream", "*/*"),
             )
           },
           onExportZip = {
@@ -180,6 +217,10 @@ class MainActivity : ComponentActivity() {
             val (name, payload) = viewModel.buildActiveProjectJsonForExport()
             pendingJsonPayload = payload
             jsonCreateLauncher.launch(name)
+          },
+          onSaveMp4 = {
+            val projName = viewModel.uiState.value.activeProject?.name?.replace(Regex("\\s+"), "_") ?: "kythera"
+            mp4CreateLauncher.launch("$projName.mp4")
           },
         )
       }
@@ -204,10 +245,12 @@ class MainActivity : ComponentActivity() {
 private fun KytheraStudioApp(
   viewModel: StudioViewModel,
   onPickMedia: () -> Unit,
+  onPickAudio: () -> Unit,
   onImportProject: () -> Unit,
   onImportZip: () -> Unit,
   onExportZip: () -> Unit,
   onExportJson: () -> Unit,
+  onSaveMp4: () -> Unit,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val snackbarHostState = remember { SnackbarHostState() }
@@ -294,29 +337,24 @@ private fun KytheraStudioApp(
                 onToggleLock = viewModel::toggleLayerLock,
                 onShiftLayerStart = viewModel::shiftLayerStart,
                 onPickMedia = onPickMedia,
-                onAddAudio = {
-                  viewModel.addLayer(LayerType.AUDIO, "Synth Pulse Beat.wav", colorHex = 0xFF00C48C)
-                },
-                onAddText = {
-                  viewModel.addLayer(LayerType.TEXT, "Title Layer", textContent = "MOTION", colorHex = 0xFFF3F6FF)
-                },
-                onAddShape = {
-                  val kinds = ShapeKind.entries
-                  val nextKind = kinds[(uiState.activeProject?.layers?.size ?: 0) % kinds.size]
-                  viewModel.addLayer(LayerType.SHAPE, nextKind.label, shapeKind = nextKind, colorHex = 0xFF00C6FF)
-                },
+                onAddAudio = onPickAudio,
+                onAddText = { viewModel.setShowAddTextDialog(true) },
+                onAddShape = { viewModel.setShowShapePickerDialog(true) },
                 onToggleDrawMode = viewModel::toggleDrawMode,
                 onOpenEffects = { viewModel.setShowEffectsSheet(true) },
                 onOpenAnimation = { viewModel.setShowAnimationSheet(true) },
                 onOpenLayerSettings = { viewModel.setShowLayerSettingsDialog(true) },
-                onRequestImageLoad = viewModel::ensureImageLoaded,
+                onRequestMediaLoad = viewModel::ensureMediaLoaded,
                 onCommitDrawStroke = viewModel::appendDrawStroke,
+                onDragSelectedLayer = viewModel::nudgeSelectedLayerPosition,
               )
 
               StudioTab.SCRIPTS -> JsStudioScreen(
                 preset = uiState.jsPreset,
                 files = uiState.jsFiles,
+                binaryFiles = uiState.jsBinaryFiles,
                 activeFile = uiState.jsActiveFile,
+                runRevision = uiState.jsRunRevision,
                 consoleLogs = uiState.jsConsoleLogs,
                 isPlaying = uiState.jsPlaying,
                 onBack = { viewModel.selectTab(StudioTab.HOME) },
@@ -327,6 +365,7 @@ private fun KytheraStudioApp(
                 onImportZip = onImportZip,
                 onExportZip = onExportZip,
                 onRunRender = viewModel::runJsRenderPass,
+                onConsoleLog = viewModel::appendJsConsoleLog,
                 onClearConsole = viewModel::clearJsConsole,
                 onSendToTimeline = viewModel::sendJsAnimationToTimeline,
                 bottomContentPadding = bottomNavPad,
@@ -339,8 +378,9 @@ private fun KytheraStudioApp(
                 onUpdateFps = { viewModel.updateExportConfig(fps = it) },
                 onUpdateBitrate = { viewModel.updateExportConfig(bitrateMbps = it) },
                 onUpdateFormat = { viewModel.updateExportConfig(format = it) },
-                onStartExport = viewModel::startSimulatedExport,
+                onStartExport = viewModel::startRealMp4Export,
                 onCancelExport = viewModel::cancelExport,
+                onSaveMp4 = onSaveMp4,
                 onExportJson = onExportJson,
                 bottomContentPadding = bottomNavPad,
               )
@@ -363,6 +403,36 @@ private fun KytheraStudioApp(
       NewProjectDialog(
         onCreate = viewModel::createProject,
         onDismiss = { viewModel.setShowNewProjectDialog(false) },
+      )
+    }
+
+    if (uiState.showAddTextDialog) {
+      AddTextDialog(
+        onAdd = { text, fontSize, colorHex ->
+          viewModel.addLayer(
+            type = LayerType.TEXT,
+            name = text.take(18),
+            textContent = text,
+            fontSizeSp = fontSize,
+            colorHex = colorHex,
+            initialOffsetY = -28f,
+          )
+        },
+        onDismiss = { viewModel.setShowAddTextDialog(false) },
+      )
+    }
+
+    if (uiState.showShapePickerDialog) {
+      ShapePickerDialog(
+        onPickShape = { shapeKind, colorHex ->
+          viewModel.addLayer(
+            type = LayerType.SHAPE,
+            name = shapeKind.label,
+            shapeKind = shapeKind,
+            colorHex = colorHex,
+          )
+        },
+        onDismiss = { viewModel.setShowShapePickerDialog(false) },
       )
     }
 

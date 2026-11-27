@@ -498,6 +498,112 @@ object StudioJsonSerializer {
       layers = layers,
     )
   }
+
+  fun parseExternalTimelineJson(raw: String, fallbackName: String = "Imported Timeline"): StudioProject? {
+    return runCatching {
+      val trimmed = raw.trim()
+      if (trimmed.isEmpty()) return null
+      val obj = if (trimmed.startsWith("[")) {
+        JSONObject().put("layers", JSONArray(trimmed))
+      } else {
+        JSONObject(trimmed)
+      }
+
+      // If already native Kythera format with positionKeys/durationSec
+      val existingLayers = obj.optJSONArray("layers")
+      if (existingLayers != null && existingLayers.length() > 0 && existingLayers.getJSONObject(0).has("positionKeys")) {
+        return projectFromJson(obj)
+      }
+
+      val arr = existingLayers
+        ?: obj.optJSONArray("tracks")
+        ?: obj.optJSONArray("clips")
+        ?: obj.optJSONArray("elements")
+        ?: obj.optJSONArray("items")
+        ?: obj.optJSONArray("scenes")
+        ?: JSONArray()
+
+      val duration = obj.optDouble("durationSec", obj.optDouble("duration", 8.0)).toFloat().coerceIn(2f, 120f)
+      val fps = obj.optInt("fps", 60).coerceIn(15, 120)
+      val projectName = obj.optString("name", obj.optString("title", fallbackName)).ifBlank { fallbackName }
+
+      val parsedLayers = buildList {
+        for (i in 0 until arr.length()) {
+          val item = arr.optJSONObject(i) ?: continue
+          val rawType = item.optString("type", item.optString("kind", "")).lowercase()
+          val textVal = item.optString("text", item.optString("textContent", item.optString("label", "")))
+          val layerType = when {
+            rawType.contains("text") || textVal.isNotBlank() && !rawType.contains("shape") && !rawType.contains("audio") && !rawType.contains("video") -> LayerType.TEXT
+            rawType.contains("audio") || rawType.contains("sound") -> LayerType.AUDIO
+            rawType.contains("video") -> LayerType.VIDEO
+            rawType.contains("image") || rawType.contains("img") -> LayerType.IMAGE
+            rawType.contains("draw") || rawType.contains("path") -> LayerType.DRAW
+            else -> LayerType.SHAPE
+          }
+
+          val start = item.optDouble("startSec", item.optDouble("start", item.optDouble("startTime", 0.0))).toFloat().coerceAtLeast(0f)
+          val endOpt = item.optDouble("endSec", item.optDouble("end", -1.0)).toFloat()
+          val dur = if (endOpt > start) {
+            (endOpt - start).coerceAtLeast(0.5f)
+          } else {
+            item.optDouble("durationSec", item.optDouble("duration", (duration - start).toDouble())).toFloat().coerceAtLeast(0.5f)
+          }
+
+          val colorPalette = listOf(0xFF5B6BFFL, 0xFF00C6FFL, 0xFF9C6BFFL, 0xFFFF7A64L, 0xFF00C48CL)
+          val layerColor = parseColorLong(item.optString("color", ""), colorPalette[i % colorPalette.size])
+          val name = item.optString("name", item.optString("id", textVal.ifBlank { "${layerType.label} ${i + 1}" }))
+          val shapeKind = when {
+            rawType.contains("circle") || rawType.contains("orb") -> ShapeKind.CIRCLE
+            rawType.contains("ring") -> ShapeKind.RING
+            rawType.contains("star") -> ShapeKind.STAR
+            rawType.contains("wave") -> ShapeKind.WAVE
+            else -> ShapeKind.entries[i % 4]
+          }
+
+          add(
+            LayerTrack(
+              id = item.optString("id", "tl_${System.currentTimeMillis()}_$i"),
+              name = name,
+              type = layerType,
+              startSec = start,
+              durationSec = dur,
+              colorHex = layerColor,
+              textContent = textVal.ifBlank { name },
+              fontSizeSp = item.optDouble("fontSize", 30.0).toFloat().coerceIn(14f, 64f),
+              shapeKind = shapeKind,
+            ),
+          )
+        }
+      }
+
+      if (parsedLayers.isEmpty()) return null
+
+      StudioProject(
+        id = "proj_${System.currentTimeMillis()}",
+        name = projectName,
+        aspectRatio = AspectRatioOption.fromLabel(obj.optString("aspectRatio", "9:16")),
+        fps = fps,
+        resolutionLabel = obj.optString("resolution", "1080p"),
+        durationSec = maxOf(duration, parsedLayers.maxOf { it.endSec }),
+        updatedLabel = "Imported Timeline",
+        accentColorHex = parsedLayers.first().colorHex,
+        layers = parsedLayers,
+      )
+    }.getOrNull()
+  }
+
+  private fun parseColorLong(hexStr: String, fallback: Long): Long {
+    val clean = hexStr.trim()
+    if (!clean.startsWith("#")) return fallback
+    val hex = clean.drop(1)
+    return runCatching {
+      when (hex.length) {
+        6 -> 0xFF000000L or hex.toLong(16)
+        8 -> hex.toLong(16)
+        else -> fallback
+      }
+    }.getOrDefault(fallback)
+  }
 }
 
 fun Color.Companion.fromHexLong(hex: Long): Color = Color(hex)

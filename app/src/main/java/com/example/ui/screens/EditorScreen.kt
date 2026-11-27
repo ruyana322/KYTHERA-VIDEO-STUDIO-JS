@@ -105,8 +105,9 @@ fun EditorScreen(
   onOpenEffects: () -> Unit,
   onOpenAnimation: () -> Unit,
   onOpenLayerSettings: () -> Unit,
-  onRequestImageLoad: (String) -> Unit,
+  onRequestMediaLoad: (String, Boolean) -> Unit,
   onCommitDrawStroke: (List<DrawPointNorm>) -> Unit,
+  onDragSelectedLayer: (Float, Float) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   BackHandler(onBack = onBackHome)
@@ -252,8 +253,9 @@ fun EditorScreen(
               previewQuality = uiState.previewQuality,
               isDrawMode = uiState.isDrawMode,
               loadedImages = uiState.loadedImages,
-              onRequestImageLoad = onRequestImageLoad,
+              onRequestMediaLoad = onRequestMediaLoad,
               onCommitDrawStroke = onCommitDrawStroke,
+              onDragSelectedLayer = onDragSelectedLayer,
               modifier = Modifier.weight(1f),
             )
             TransportControlsBar(
@@ -292,8 +294,9 @@ fun EditorScreen(
             previewQuality = uiState.previewQuality,
             isDrawMode = uiState.isDrawMode,
             loadedImages = uiState.loadedImages,
-            onRequestImageLoad = onRequestImageLoad,
+            onRequestMediaLoad = onRequestMediaLoad,
             onCommitDrawStroke = onCommitDrawStroke,
+            onDragSelectedLayer = onDragSelectedLayer,
             modifier = Modifier.weight(0.50f),
           )
           TransportControlsBar(
