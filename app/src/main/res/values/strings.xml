@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Kythera Studio</string>
+    <string name="render_notif_channel_name">Render Video MP4</string>
+    <string name="render_notif_channel_desc">Menampilkan progres render Motion Graphic MP4 secara real-time</string>
 </resources>

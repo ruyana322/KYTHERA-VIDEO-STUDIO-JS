@@ -1,6 +1,6 @@
 {
   "name": "Kythera Studio",
-  "description": "KYTHERA VIDEO STUDIO — Create Without Limits. Native Jetpack Compose motion graphics & multi-layer video editing studio with frosted glassmorphism UI, Bezier keyframe animation, effects browser, JS Animation Studio, and MediaCodec export.",
+  "description": "Studio Motion Graphic Android native 100% offline dengan editor portrait, Auto-Draft deteksi jeda suara, perender Canvas deterministik, mixer audio AAC, dan ekspor MP4 1080x1920 ke galeri.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
